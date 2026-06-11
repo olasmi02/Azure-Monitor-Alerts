@@ -40,38 +40,36 @@ $containerName = "loadtestcontainer"
 Write-Host "Creating test container '$containerName'..." -ForegroundColor Cyan
 $null = az storage container create --name $containerName --connection-string $connString --output json
 
-# Create a small temp file to upload
-$tempFile = Join-Path $env:TEMP "load-sim-test-file.txt"
-"Observability and Alerts Load Simulation Data - " + (Get-Date).ToString() | Out-File -FilePath $tempFile -Encoding utf8
+# Create a local temporary directory and populate with 100 small files
+$tempDir = Join-Path $env:TEMP "alerttestload"
+if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
+$null = New-Item -ItemType Directory -Path $tempDir -Force
+
+Write-Host "Creating 100 temporary files for batch upload..." -ForegroundColor Cyan
+for ($i = 1; $i -le 100; $i++) {
+    "Load test data for file $i" | Out-File -FilePath (Join-Path $tempDir "file-$i.txt") -Encoding utf8
+}
 
 Write-Host "--------------------------------------------------" -ForegroundColor Gray
-Write-Host "Starting simulation loop: performing 120 blob uploads..." -ForegroundColor Yellow
-Write-Host "This will exceed the threshold of 50 transactions/minute." -ForegroundColor Yellow
+Write-Host "Starting batch upload: uploading 100 files in parallel..." -ForegroundColor Yellow
+Write-Host "This will generate 100+ write transactions within seconds!" -ForegroundColor Yellow
 Write-Host "--------------------------------------------------" -ForegroundColor Gray
 
 $startTime = Get-Date
 
-for ($i = 1; $i -le 120; $i++) {
-    $blobName = "testblob-$i"
-    # Upload blob
-    $upload = az storage blob upload --container-name $containerName --file $tempFile --name $blobName --connection-string $connString --no-progress --output json 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  [$i/120] Successfully uploaded $blobName" -ForegroundColor Green
-    } else {
-        Write-Warning "  [$i/120] Upload failed for $blobName"
-    }
-    # Dynamic pause to distribute load slightly, but stay fast enough to trigger within 1 minute
-    Start-Sleep -Milliseconds 100
-}
+# Upload using upload-batch (extremely fast parallel upload)
+$upload = az storage blob upload-batch --destination $containerName --source $tempDir --connection-string $connString --no-progress --output json
+$exitCode = $LASTEXITCODE
 
 $duration = (Get-Date) - $startTime
 Write-Host "--------------------------------------------------" -ForegroundColor Gray
-Write-Host "Load simulation complete! Total time: $($duration.TotalSeconds) seconds." -ForegroundColor Green
-Write-Host "Cleaning up test container..." -ForegroundColor Cyan
-$null = az storage container delete --name $containerName --connection-string $connString --yes --output json
+if ($exitCode -eq 0) {
+    Write-Host "Batch upload complete! Successfully generated 100+ transactions in $($duration.TotalSeconds) seconds." -ForegroundColor Green
+} else {
+    Write-Warning "Batch upload encountered issues. Please verify the output above."
+}
 
-# Clean up local file
-if (Test-Path $tempFile) { Remove-Item $tempFile }
+# Clean up local temporary files
+if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
 
-Write-Host "Cleanup complete." -ForegroundColor Green
 Write-Host "`n>>> ACTION REQUIRED: Wait 3-5 minutes for Azure Monitor to evaluate metrics and fire the alert. You should receive an email notification shortly." -ForegroundColor Yellow
